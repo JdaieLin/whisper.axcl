@@ -1,0 +1,12 @@
+{
+  "name": "whisper-service-demo",
+  "version": "1.0.0",
+  "description": "A Node.js wrapper for the C++ whisper service.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.17.1"
+  }
+}
