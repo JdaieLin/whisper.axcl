@@ -9,7 +9,7 @@ app.use(express.json());
 
 // --- Configuration ---
 // Path to the C++ whisper executable, relative to the root of the project.
-const whisperExecutablePath = path.resolve(__dirname, '..', 'build', 'whisper');
+const whisperExecutablePath = path.resolve(__dirname, '..', 'whisper');
 // Arguments for the whisper executable to run in service mode.
 // Add any other necessary model paths etc. here.
 const whisperArgs = [
