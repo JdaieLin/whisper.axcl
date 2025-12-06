@@ -112,100 +112,30 @@ std::unique_ptr<middleware::runner> load_runner(const std::string& model_path) {
 }
 
 
-int main(int argc, char** argv) {
-    cmdline::parser cmd;
-    cmd.add<std::string>("encoder", 'e', "encoder axmodel", false, "./models/small-encoder.axmodel");
-    cmd.add<std::string>("decoder_main", 'm', "decoder_main axmodel", false, "./models/small-decoder-main.axmodel");
-    cmd.add<std::string>("decoder_loop", 'l', "decoder_loop axmodel", false, "./models/small-decoder-loop.axmodel");
-    cmd.add<std::string>("position_embedding", 'p', "position_embedding.bin", false, "./models/small-positional_embedding.bin");
-    cmd.add<std::string>("token", 't', "tokens txt", false, "./models/small-tokens.txt");
-    cmd.add<std::string>("wav", 'w', "wav file", true, "");
-    cmd.add<std::string>("model_type", 0, "tiny, small, large", false, "small");
-    cmd.add<std::string>("language", 0, "en, zh", false, "zh");
-    cmd.parse_check(argc, argv);
 
-    // 0. get app args, can be removed from user's app
-    auto encoder_file = cmd.get<std::string>("encoder");
-    auto decoder_main_file = cmd.get<std::string>("decoder_main");
-    auto decoder_loop_file = cmd.get<std::string>("decoder_loop");
-    auto pe_file = cmd.get<std::string>("position_embedding");
-    auto token_file = cmd.get<std::string>("token");
-    auto wav_file = cmd.get<std::string>("wav");
-    auto model_type = cmd.get<std::string>("model_type");
-    auto language = cmd.get<std::string>("language");
-
+std::string do_whisper(const std::string& wav_file,
+                       const std::string& model_type,
+                       const std::string& language,
+                       std::unique_ptr<middleware::runner>& encoder,
+                       std::unique_ptr<middleware::runner>& decoder_main,
+                       std::unique_ptr<middleware::runner>& decoder_loop,
+                       const std::vector<float>& positional_embedding,
+                       const std::vector<std::string>& token_tables) {
     if (WHISPER_N_TEXT_STATE_MAP.find(model_type) == WHISPER_N_TEXT_STATE_MAP.end()) {
         fprintf(stderr, "Can NOT find n_text_state for model_type: %s\n", model_type.c_str());
-        return -1;
+        return "";
     }
 
-    int WHISPER_N_TEXT_STATE = WHISPER_N_TEXT_STATE_MAP[model_type];
-    clock_t start, end;
-
-    printf("encoder: %s\n", encoder_file.c_str());
-    printf("decoder_main: %s\n", decoder_main_file.c_str());
-    printf("decoder_loop: %s\n", decoder_loop_file.c_str());
-    printf("wav_file: %s\n", wav_file.c_str());
-    printf("language: %s\n", language.c_str());
-
-    utilities::timer timer;
-    timer.start();
-    auto encoder = load_runner(encoder_file);
-    if (!encoder) {
-        printf("Load encoder failed!\n");
-        return -1;
-    }
-    timer.stop();
-    printf("Load encoder take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
-
-    timer.start();
-    auto decoder_main = load_runner(decoder_main_file);
-    if (!decoder_main) {
-        printf("Load decoder_main failed!\n");
-        return -1;
-    }
-    timer.stop();
-    printf("Load decoder_main take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
-
-    timer.start();
-    auto decoder_loop = load_runner(decoder_loop_file);
-    if (!decoder_loop) {
-        printf("Load decoder_loop failed!\n");
-        return -1;
-    }
-    timer.stop();
-    printf("Load decoder_loop take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
+    int WHISPER_N_TEXT_STATE = WHISPER_N_TEXT_STATE_MAP.at(model_type);
 
     AudioFile<float> audio_file;
     if (!audio_file.load(wav_file)) {
         printf("load wav failed!\n");
-        return -1;
+        return "";
     }
 
     auto& samples = audio_file.samples[0];
     int n_samples = samples.size();
-
-    printf("Read positional_embedding\n");
-    std::vector<float> positional_embedding(WHISPER_N_TEXT_CTX * WHISPER_N_TEXT_STATE);
-    FILE* fp = fopen(pe_file.c_str(), "rb");
-    if (!fp) {
-        fprintf(stderr, "Can NOT open %s\n", pe_file.c_str());
-        return -1;
-    }
-    fread(positional_embedding.data(), sizeof(float), WHISPER_N_TEXT_CTX * WHISPER_N_TEXT_STATE, fp);
-    fclose(fp);
-
-    std::vector<std::string> token_tables;
-    std::ifstream ifs(token_file);
-    if (!ifs.is_open()) {
-        fprintf(stderr, "Can NOT open %s\n", token_file.c_str());
-        return -1;
-    }
-    std::string line;
-    while (std::getline(ifs, line)) {
-        size_t i = line.find(' ');
-        token_tables.push_back(line.substr(0, i));
-    }
 
     auto mel = librosa::Feature::melspectrogram(samples, WHISPER_SAMPLE_RATE, WHISPER_N_FFT, WHISPER_HOP_LENGTH, "hann", true, "reflect", 2.0f, WHISPER_N_MELS, 0.0f, WHISPER_SAMPLE_RATE / 2.0f);
     int n_mel = mel.size();
@@ -238,7 +168,7 @@ int main(int argc, char** argv) {
     std::vector<int> results;
     std::vector<int> tokens(1);
     bool is_broke = false;
-    
+
     std::vector<float> n_layer_cross_k(encoder->get_output_size(0) / sizeof(float));
     std::vector<float> n_layer_cross_v(encoder->get_output_size(1) / sizeof(float));
 
@@ -252,61 +182,38 @@ int main(int argc, char** argv) {
         memcpy(continous_mel.data() + i * n_len, mel[i].data(), sizeof(float) * n_len);
     }
 
-    // fp = fopen("mel.bin", "wb");
-    // fwrite(continous_mel.data(), sizeof(float), continous_mel.size(), fp);
-    // fclose(fp);
-
-    // fp = fopen("../../whisper.axera/cpp/mel.bin", "rb");
-    // fread(continous_mel.data(), sizeof(float), continous_mel.size(), fp);
-    // fclose(fp);
-
     utilities::timer all_timer;
+    utilities::timer timer;
     timer.start();
     all_timer.start();
     axclrtMemcpy(encoder->get_input_pointer(0), continous_mel.data(), sizeof(float) * continous_mel.size(), AXCL_MEMCPY_HOST_TO_DEVICE);
     if (!encoder->run(false)) {
         printf("encoder run failed!\n");
-        return -1;
+        return "";
     }
     timer.stop();
     printf("Encoder run take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
-    // axclrtMemcpy(n_layer_cross_k.data(), encoder->get_output_pointer(0), sizeof(float) * n_layer_cross_k.size(), AXCL_MEMCPY_DEVICE_TO_HOST);
-    // axclrtMemcpy(n_layer_cross_v.data(), encoder->get_output_pointer(1), sizeof(float) * n_layer_cross_v.size(), AXCL_MEMCPY_DEVICE_TO_HOST);
-
-    // fp = fopen("n_layer_cross_k.bin", "wb");
-    // fwrite(n_layer_cross_k.data(), sizeof(float), n_layer_cross_k.size(), fp);
-    // fclose(fp);
-
-    // fp = fopen("n_layer_cross_v.bin", "wb");
-    // fwrite(n_layer_cross_v.data(), sizeof(float), n_layer_cross_v.size(), fp);
-    // fclose(fp);
 
     // detect language
-    SOT_SEQUENCE[1] = detect_language(language);
+    auto sot_sequence = SOT_SEQUENCE;
+    sot_sequence[1] = detect_language(language);
 
     // decoder_main
     timer.start();
-    axclrtMemcpy(decoder_main->get_input_pointer(0), SOT_SEQUENCE.data(), sizeof(int) * SOT_SEQUENCE.size(), AXCL_MEMCPY_HOST_TO_DEVICE);
+    axclrtMemcpy(decoder_main->get_input_pointer(0), sot_sequence.data(), sizeof(int) * sot_sequence.size(), AXCL_MEMCPY_HOST_TO_DEVICE);
     axclrtMemcpy(decoder_main->get_input_pointer(1), encoder->get_output_pointer(0), decoder_main->get_input_size(1), AXCL_MEMCPY_DEVICE_TO_DEVICE);
     axclrtMemcpy(decoder_main->get_input_pointer(2), encoder->get_output_pointer(1), decoder_main->get_input_size(2), AXCL_MEMCPY_DEVICE_TO_DEVICE);
     if (!decoder_main->run(false)) {
         printf("decoder_main run failed!\n");
-        return -1;
+        return "";
     }
     axclrtMemcpy(decoder_main_logits.data(), decoder_main->get_output_pointer(0), sizeof(float) * decoder_main_logits.size(), AXCL_MEMCPY_DEVICE_TO_HOST);
-    // axclrtMemcpy(n_layer_self_k_cache.data(), decoder_main->get_output_pointer(1), sizeof(float) * n_layer_self_k_cache.size(), AXCL_MEMCPY_DEVICE_TO_HOST);
-    // axclrtMemcpy(n_layer_self_v_cache.data(), decoder_main->get_output_pointer(2), sizeof(float) * n_layer_self_v_cache.size(), AXCL_MEMCPY_DEVICE_TO_HOST);
     timer.stop();
 
-    offset += SOT_SEQUENCE.size();
-    // logits = logits[0, -1]
+    offset += sot_sequence.size();
     std::copy(decoder_main_logits.begin() + 3 * WHISPER_VOCAB_SIZE, decoder_main_logits.end(), logits.begin());
     supress_tokens(logits, true);
     max_token_id = argmax(logits);
-
-    // fp = fopen("logits.bin", "wb");
-    // fwrite(logits.data(), sizeof(float),logits.size(), fp);
-    // fclose(fp);
 
     float first_token_cost = timer.elapsed<utilities::timer::milliseconds>();
     printf("First token: %d \t take %.2fms\n", max_token_id, first_token_cost);
@@ -316,25 +223,15 @@ int main(int argc, char** argv) {
         mask[n] = NEG_INF;
     }
 
-    // fp = fopen("logits.bin", "wb");
-    // fwrite(logits.data(), sizeof(float), logits.size(), fp);
-    // fclose(fp);
     axclrtMemcpy(decoder_loop->get_input_pointer(1), decoder_main->get_output_pointer(1), decoder_loop->get_input_size(1), AXCL_MEMCPY_DEVICE_TO_DEVICE);
     axclrtMemcpy(decoder_loop->get_input_pointer(2), decoder_main->get_output_pointer(2), decoder_loop->get_input_size(2), AXCL_MEMCPY_DEVICE_TO_DEVICE);
-
-    // for (int i = 0; i < decoder_loop->get_input_count(); i++) {
-    //     printf("decoder_loop input[%d] name: %s size: %d\n", i, decoder_loop->get_input_name(i).c_str(), decoder_loop->get_input_size(i));
-    // }
-    // for (int i = 0; i < decoder_loop->get_output_count(); i++) {
-    //     printf("decoder_loop output[%d] name: %s size: %d\n", i, decoder_loop->get_output_name(i).c_str(), decoder_loop->get_output_size(i));
-    // }
     axclrtMemcpy(decoder_loop->get_input_pointer(3), encoder->get_output_pointer(0), decoder_loop->get_input_size(3), AXCL_MEMCPY_DEVICE_TO_DEVICE);
     axclrtMemcpy(decoder_loop->get_input_pointer(4), encoder->get_output_pointer(1), decoder_loop->get_input_size(4), AXCL_MEMCPY_DEVICE_TO_DEVICE);
 
     utilities::timer loop_timer;
     loop_timer.start();
     int loop_token_num = 0;
-    for (int i = 0; i < WHISPER_N_TEXT_CTX - SOT_SEQUENCE.size(); i++) {
+    for (int i = 0; i < WHISPER_N_TEXT_CTX - sot_sequence.size(); i++) {
         if (max_token_id == WHISPER_EOT) {
             is_broke = true;
             break;
@@ -345,41 +242,25 @@ int main(int argc, char** argv) {
 
         results.push_back(max_token_id);
         tokens[0] = results.back();
-        // mask[:model.n_text_ctx - offset[0] - 1] = -torch.inf
-       
-        // inference
-        // timer.start();
+
         axclrtMemcpy(decoder_loop->get_input_pointer(0), tokens.data(), sizeof(int) * tokens.size(), AXCL_MEMCPY_HOST_TO_DEVICE);
         axclrtMemcpy(decoder_loop->get_input_pointer(5), positional_embedding.data() + offset * WHISPER_N_TEXT_STATE, decoder_loop->get_input_size(5), AXCL_MEMCPY_HOST_TO_DEVICE);
         axclrtMemcpy(decoder_loop->get_input_pointer(6), mask.data(), sizeof(float) * mask.size(), AXCL_MEMCPY_HOST_TO_DEVICE);
-        // timer.stop();
-        // printf("Memcpy input take %.2fms\n", timer.elapsed<utilities::timer::milliseconds>());
 
-        // timer.start();
         if (!decoder_loop->run(false)) {
             printf("decoder_loop run failed!\n");
-            return -1;
-        } 
-        // timer.stop();
-        // printf("Run take %.2fms\n", timer.elapsed<utilities::timer::milliseconds>());
+            return "";
+        }
 
-        // timer.start();
         axclrtMemcpy(decoder_loop->get_input_pointer(1), decoder_loop->get_output_pointer(1), sizeof(float) * n_layer_self_k_cache.size(), AXCL_MEMCPY_DEVICE_TO_DEVICE);
         axclrtMemcpy(decoder_loop->get_input_pointer(2), decoder_loop->get_output_pointer(2), sizeof(float) * n_layer_self_v_cache.size(), AXCL_MEMCPY_DEVICE_TO_DEVICE);
-        // timer.stop();
-        // printf("Memcpy KVCache (DEVICE TO DEVICE) take %.2fms\n", timer.elapsed<utilities::timer::milliseconds>());
-
-        // get logits output
-        // timer.start();
         axclrtMemcpy(logits.data(), decoder_loop->get_output_pointer(0), sizeof(float) * logits.size(), AXCL_MEMCPY_DEVICE_TO_HOST);
-        // timer.stop();
-        // printf("Memcpy output logits take %.2fms\n", timer.elapsed<utilities::timer::milliseconds>());
 
         offset += 1;
         mask[WHISPER_N_TEXT_CTX - offset - 1] = 0;
- 
+
         supress_tokens(logits, false);
-        max_token_id = argmax(logits);  
+        max_token_id = argmax(logits);
 
         loop_token_num++;
 
@@ -400,14 +281,104 @@ int main(int argc, char** argv) {
     }
 
     if (language == "en") {
-        printf("Result: %s\n", s.c_str());
-    }
-    else {
+        return s;
+    } else {
         const opencc::SimpleConverter converter("t2s.json");
-        std::string simple_str = converter.Convert(s);
-        printf("Result: %s\n", simple_str.c_str());
+        return converter.Convert(s);
+    }
+}
+
+int main(int argc, char** argv) {
+    cmdline::parser cmd;
+    cmd.add<std::string>("encoder", 'e', "encoder axmodel", false, "./models/small-encoder.axmodel");
+    cmd.add<std::string>("decoder_main", 'm', "decoder_main axmodel", false, "./models/small-decoder-main.axmodel");
+    cmd.add<std::string>("decoder_loop", 'l', "decoder_loop axmodel", false, "./models/small-decoder-loop.axmodel");
+    cmd.add<std::string>("position_embedding", 'p', "position_embedding.bin", false, "./models/small-positional_embedding.bin");
+    cmd.add<std::string>("token", 't', "tokens txt", false, "./models/small-tokens.txt");
+    cmd.add<std::string>("wav", 'w', "wav file", false, "");
+    cmd.add<std::string>("model_type", 0, "tiny, small, large", false, "small");
+    cmd.add<std::string>("language", 0, "en, zh", false, "zh");
+    cmd.parse_check(argc, argv);
+
+    auto encoder_file = cmd.get<std::string>("encoder");
+    auto decoder_main_file = cmd.get<std::string>("decoder_main");
+    auto decoder_loop_file = cmd.get<std::string>("decoder_loop");
+    auto pe_file = cmd.get<std::string>("position_embedding");
+    auto token_file = cmd.get<std::string>("token");
+    auto model_type = cmd.get<std::string>("model_type");
+    auto language = cmd.get<std::string>("language");
+
+    printf("encoder: %s\n", encoder_file.c_str());
+    printf("decoder_main: %s\n", decoder_main_file.c_str());
+    printf("decoder_loop: %s\n", decoder_loop_file.c_str());
+    printf("language: %s\n", language.c_str());
+
+    utilities::timer timer;
+    timer.start();
+    auto encoder = load_runner(encoder_file);
+    if (!encoder) {
+        printf("Load encoder failed!\n");
+        return -1;
+    }
+    timer.stop();
+    printf("Load encoder take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
+
+    timer.start();
+    auto decoder_main = load_runner(decoder_main_file);
+    if (!decoder_main) {
+        printf("Load decoder_main failed!\n");
+        return -1;
+    }
+    timer.stop();
+    printf("Load decoder_main take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
+
+    timer.start();
+    auto decoder_loop = load_runner(decoder_loop_file);
+    if (!decoder_loop) {
+        printf("Load decoder_loop failed!\n");
+        return -1;
+    }
+    timer.stop();
+    printf("Load decoder_loop take %.2f ms\n", timer.elapsed<utilities::timer::milliseconds>());
+
+    printf("Read positional_embedding\n");
+    std::vector<float> positional_embedding(WHISPER_N_TEXT_CTX * WHISPER_N_TEXT_STATE_MAP.at(model_type));
+    FILE* fp = fopen(pe_file.c_str(), "rb");
+    if (!fp) {
+        fprintf(stderr, "Can NOT open %s\n", pe_file.c_str());
+        return -1;
+    }
+    fread(positional_embedding.data(), sizeof(float), positional_embedding.size(), fp);
+    fclose(fp);
+
+    std::vector<std::string> token_tables;
+    std::ifstream ifs(token_file);
+    if (!ifs.is_open()) {
+        fprintf(stderr, "Can NOT open %s\n", token_file.c_str());
+        return -1;
+    }
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t i = line.find(' ');
+        token_tables.push_back(line.substr(0, i));
+    }
+
+    std::string wav_file = cmd.get<std::string>("wav");
+    if (!wav_file.empty()) {
+        std::string result = do_whisper(wav_file, model_type, language, encoder, decoder_main, decoder_loop, positional_embedding, token_tables);
+        printf("Result: %s\n", result.c_str());
+    } else {
+        printf("Entering interactive mode. Please enter WAV file paths.\n");
+        while (true) {
+            printf("Enter WAV file path (or press Ctrl+D to exit): ");
+            std::string input_path;
+            if (!std::getline(std::cin, input_path) || input_path.empty()) {
+                break;
+            }
+            std::string result = do_whisper(input_path, model_type, language, encoder, decoder_main, decoder_loop, positional_embedding, token_tables);
+            printf("Result: %s\n", result.c_str());
+        }
     }
 
     return 0;
 }
-    
