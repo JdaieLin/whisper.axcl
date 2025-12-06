@@ -14,6 +14,10 @@ Type=simple
 WorkingDirectory=$WORKDIR
 ExecStart=$WORKDIR/serve.sh
 Restart=on-failure
+LogLevel=info
+StandardOutput=$WORKDIR/server.log
+StandardError=$WORKDIR/server-err.log
+
 [Install]
 WantedBy=multi-user.target" | sudo tee $SERVICE_FILE
 
